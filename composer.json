@@ -1,0 +1,16 @@
+{
+    "name": "par-design/pardesign-entretien",
+    "description": "Private WordPress plugin connecting a site to the PAR Design maintenance backend.",
+    "type": "wordpress-plugin",
+    "license": "proprietary",
+    "authors": [
+        {
+            "name": "PAR Design",
+            "homepage": "https://pardesign.net"
+        }
+    ],
+    "require": {
+        "php": ">=7.4",
+        "composer/installers": "^1.0 || ^2.0"
+    }
+}

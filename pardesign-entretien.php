@@ -3,7 +3,7 @@
  * Plugin Name:       PAR Design — Entretien
  * Plugin URI:        https://pardesign.net
  * Description:        Capture l'état des versions (coeur WordPress + plugins) avant et après un entretien, puis déclenche l'envoi du rapport client via le backend PAR Design.
- * Version:           0.7.2
+ * Version:           0.8.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            PAR Design
@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PARDESIGN_ENTRETIEN_VERSION', '0.7.2' );
+define( 'PARDESIGN_ENTRETIEN_VERSION', '0.8.0' );
 define( 'PARDESIGN_ENTRETIEN_FILE', __FILE__ );
 define( 'PARDESIGN_ENTRETIEN_DIR', plugin_dir_path( __FILE__ ) );
 

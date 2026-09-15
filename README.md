@@ -25,8 +25,8 @@ In automatic mode (`run_auto`), the plugin backs up the database, updates plugin
   - `POST /run` — schedules a visit in the background (`scope`: `full` | `plugins` | `none`, `send`: bool).
   - `POST /recover` — recovers an interrupted visit (generates the report from the current state).
   - `POST /audit-data` — pushes an on-demand server audit.
-  - `POST /self-update` — updates the plugin itself to the latest version published by the backend.
-- **Plugin self-update** from the PAR Design backend (outside wordpress.org), via metadata and an archive served at `{backend_url}/plugin/` (`class-updater.php`).
+  - `POST /self-update` — updates the plugin itself to the latest signed GitHub release; the response carries `last_error` when no update could be verified.
+- **Plugin self-update** from signed GitHub Releases through the standard WordPress update mechanism (plugins screen, WP-CLI, `/self-update`): the release manifest is Ed25519-signed with an offline key and the archive hash is verified before install (`class-updater.php`, see [Releases](#releases)).
 - **Admin page** to configure the backend and drive a manual visit (`class-admin-ui.php`).
 - **WP-CLI commands** matching the manual visit workflow from the command line (`class-cli.php`):
 
@@ -53,6 +53,63 @@ Settings are available under **Tools → Entretien PAR Design**, or as constants
 | ClickUp email field ID | `PARDESIGN_ENTRETIEN_CLICKUP_EMAIL_FIELD_ID` |
 
 The default backend URL is `https://entretiens.pardesign.net`. The default site identifier is the site's hostname.
+
+## Releases
+
+Updates are published as GitHub Releases on the public repository `par-design/pardesign-entretien` (tag `v{version}`) with two assets that must keep these exact names.
+
+| Asset | Content |
+|---|---|
+| `pardesign-entretien.zip` | Plugin archive, top-level folder `pardesign-entretien/` |
+| `pardesign-entretien.json` | Signed manifest: `{ key_id, payload, signature }` plus unsigned legacy fields |
+
+The plugin fetches `releases/latest/download/pardesign-entretien.json`, verifies the Ed25519 signature against the public keys pinned in `Pardesign_Entretien_Updater::TRUSTED_KEYS`, then downloads `releases/download/v{version}/pardesign-entretien.zip` and checks its SHA-256 against the signed manifest before WordPress unpacks it. Neither GitHub nor the backend can produce an installable package: only the offline signing key can. Since the version is signed, downgrades are impossible. The releases repository must be readable without authentication (sites carry no GitHub token).
+
+### One-time setup: signing keys
+
+```
+php tools/keygen.php
+```
+
+Run it twice. Pin both public keys in `TRUSTED_KEYS` (ids `k1-2026`, `k2-2026`). Store the two secret keys offline in two different places (password manager, encrypted file). Never commit them, never put them in CI or hosting environment variables. The second key is the recovery key: if the first one leaks, ship a release signed with the second that removes the first from `TRUSTED_KEYS`. Planned rotation: add the new key, release, remove the old key in a later release. Placeholder values fail closed (no update is ever offered).
+
+### Publishing a release
+
+1. Bump `Version` in `pardesign-entretien.php` and `PARDESIGN_ENTRETIEN_VERSION`, commit, tag `v{version}`.
+2. Build and sign from the committed tree (the secret key is read on stdin, never from an argument):
+
+   ```
+   tools/build-release.sh k1-2026 7.0 CHANGELOG.md < /path/to/secret-k1.b64
+   ```
+
+   This writes `dist/pardesign-entretien.zip` and `dist/pardesign-entretien.json`. The manifest version is read from the plugin header inside the archive, so it can never disagree with the zip.
+3. Create the GitHub release on the tagged commit with both files:
+
+   ```
+   gh release create v{version} --latest --title v{version} --notes-file CHANGELOG.md \
+     dist/pardesign-entretien.zip dist/pardesign-entretien.json
+   ```
+
+4. Check that the assets are reachable anonymously (this is exactly what the sites do):
+
+   ```
+   curl -sIL https://github.com/par-design/pardesign-entretien/releases/latest/download/pardesign-entretien.json | grep -E '^HTTP'
+   ```
+
+Never mark a release as draft or pre-release: `releases/latest` ignores both, so sites would keep the previous version. Never delete a published release either; publish a fixed version instead (downgrades are refused by the updater).
+
+Staging: define `PARDESIGN_ENTRETIEN_UPDATE_REPO` (`owner/repo`) or `PARDESIGN_ENTRETIEN_UPDATE_BASE` (an HTTPS origin mirroring the GitHub layout) in `wp-config.php`. Signing makes the origin a matter of availability only.
+
+### Compatibility with sites still on 0.7.x
+
+Versions up to 0.7.2 read `{backend_url}/plugin/pardesign-entretien.json` (expecting a plain manifest with a top-level `version`) and install `{backend_url}/plugin/pardesign-entretien.zip`, without verification. The signed manifest keeps those legacy top-level fields, so the backend only needs two redirects to migrate old sites:
+
+```
+/plugin/pardesign-entretien.json  ->  https://github.com/par-design/pardesign-entretien/releases/latest/download/pardesign-entretien.json
+/plugin/pardesign-entretien.zip   ->  https://github.com/par-design/pardesign-entretien/releases/latest/download/pardesign-entretien.zip
+```
+
+Old sites then install the latest release through their unverified path and verify everything from the next update on. Right after that upgrade, the old code may leave a stale "update available" entry in the WordPress transient for up to 12 hours; the new updater detects it, clears it, and never reinstalls the same version. Remove the redirects once no site runs 0.7.x anymore.
 
 ## Requirements
 

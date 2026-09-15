@@ -191,8 +191,8 @@ class Pardesign_Entretien_Rest {
 	}
 
 	/**
-	 * Met à jour le plugin lui-même vers la dernière version publiée sur le backend
-	 * PAR Design, sans upload manuel. Piloté par le backend (bouton « Déployer la
+	 * Met à jour le plugin lui-même vers la dernière release GitHub signée (voir
+	 * class-updater.php), sans upload manuel. Piloté par le backend (bouton « Déployer la
 	 * mise à jour »). Vide les caches de vérification, relance la détection, puis
 	 * lance l'upgrader WordPress. Synchrone (archive légère) et idempotent : si le
 	 * site est déjà à jour, répond `updated:false` sans rien faire.
@@ -225,7 +225,7 @@ class Pardesign_Entretien_Rest {
 
 		if ( '' === $target ) {
 			return new WP_REST_Response(
-				array( 'ok' => true, 'updated' => false, 'version' => $before ),
+				array( 'ok' => true, 'updated' => false, 'version' => $before, 'last_error' => Pardesign_Entretien_Updater::last_error() ),
 				200
 			);
 		}
@@ -235,7 +235,7 @@ class Pardesign_Entretien_Rest {
 		$result   = $upgrader->upgrade( $basename );
 
 		if ( is_wp_error( $result ) ) {
-			return new WP_REST_Response( array( 'ok' => false, 'error' => $result->get_error_message() ), 500 );
+			return new WP_REST_Response( array( 'ok' => false, 'error' => $result->get_error_message(), 'last_error' => Pardesign_Entretien_Updater::last_error() ), 500 );
 		}
 		if ( false === $result || null === $result ) {
 			$messages = $skin->get_upgrade_messages();

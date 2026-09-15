@@ -1,0 +1,7 @@
+# Keep release archives (git archive) limited to runtime files.
+/tools/          export-ignore
+/dist/           export-ignore
+/.vscode/        export-ignore
+/.gitignore      export-ignore
+/.gitattributes  export-ignore
+/.DS_Store       export-ignore

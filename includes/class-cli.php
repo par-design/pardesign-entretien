@@ -69,7 +69,7 @@ class Pardesign_Entretien_CLI {
 	 *
 	 * ## EXEMPLES
 	 *
-	 *   wp pardesign entretien recover medicentrechomedey-com-20260702-141521-TwAVap
+	 *   wp pardesign entretien recover example-com-20260702-141521-TwAVap
 	 */
 	public function recover( $args, $assoc_args ) {
 		$id = isset( $args[0] ) ? (string) $args[0] : '';

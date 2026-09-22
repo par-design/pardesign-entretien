@@ -18,14 +18,15 @@ In automatic mode (`run_auto`), the plugin backs up the database, updates plugin
 
 - **Snapshots** of the WordPress core version and installed plugins (`class-snapshot.php`).
 - **Automatic updates** of plugins and/or core, raising PHP limits for long-running operations, with a safety net (`register_shutdown_function`) that captures a draft report if the process dies mid-run (`class-entretien.php`).
-- **Database backup** before every automatic update run: a gzipped dump via `mysqldump` when available, otherwise a pure-PHP streaming export (shared hosting) — a backup failure never blocks the visit (`class-backup.php`).
+- **Database backup** before every automatic update run: a gzipped dump via `mysqldump` when available, otherwise a pure-PHP streaming export (shared hosting) — a backup failure never blocks the visit (`class-backup.php`). Dumps live in `wp-content/uploads/pardesign-entretien-{random token}/` (token stored in an option, directory mode 0700, files 0600, `.htaccess` and `web.config` guards); the three most recent are kept, and all of them are deleted when the plugin is uninstalled (`uninstall.php`).
 - **Server audit**: PHP/WP version, HTTPS, `WP_DEBUG`, file editing disabled, detected security plugins (`class-server-audit.php`).
-- **API client** to the backend, authenticated with a per-site API key (`class-api-client.php`).
-- **REST endpoints** (`pardesign-entretien/v1`) driven by the backend, protected by a Bearer token compared in constant time (`class-rest.php`):
-  - `POST /run` — schedules a visit in the background (`scope`: `full` | `plugins` | `none`, `send`: bool).
+- **API client** to the backend, authenticated with a per-site API key sent as a Bearer token, over HTTPS only (`class-api-client.php`).
+- **REST endpoints** (`pardesign-entretien/v1`) driven by the backend. Every inbound request must be signed with the backend's Ed25519 private key and arrive over TLS; see [Inbound request signing](#inbound-request-signing) (`class-rest.php`, `class-inbound-auth.php`):
+  - `POST /run` — schedules a visit in the background (`scope`: `full` | `plugins` | `none`, `send`: bool). Answers `409` while another visit is scheduled or running (`class-lock.php`).
   - `POST /recover` — recovers an interrupted visit (generates the report from the current state).
   - `POST /audit-data` — pushes an on-demand server audit.
   - `POST /self-update` — updates the plugin itself to the latest signed GitHub release; the response carries `last_error` when no update could be verified.
+  - `POST /rotate-key` — replaces the site's outbound API key (`api_key`, 32–128 chars of `[A-Za-z0-9_-]`), so a leaked key can be closed from the backend. Refused with `409` when the key is defined as a `wp-config.php` constant.
 - **Plugin self-update** from signed GitHub Releases through the standard WordPress update mechanism (plugins screen, WP-CLI, `/self-update`): the release manifest is Ed25519-signed with an offline key and the archive hash is verified before install (`class-updater.php`, see [Releases](#releases)).
 - **Admin page** to configure the backend and drive a manual visit (`class-admin-ui.php`).
 - **WP-CLI commands** matching the manual visit workflow from the command line (`class-cli.php`):
@@ -40,6 +41,50 @@ In automatic mode (`run_auto`), the plugin backs up the database, updates plugin
   wp pardesign entretien backup
   ```
 
+## Inbound request signing
+
+The site's API key only authenticates the site towards the backend. Calls in the other direction (backend → site) are authenticated by an Ed25519 signature, so nothing stored on a site can be used to drive that site: a leaked database or key lets an attacker post fake snapshots to the backend at worst, never trigger updates.
+
+Generate the backend keypair once with `php tools/backend-keygen.php` (run it twice: the second key is a recovery key kept offline). Pin the public keys in `Pardesign_Entretien_Inbound_Auth::TRUSTED_BACKEND_KEYS` (ids `b1-2026`, `b2-2026`) and put the private key in the backend environment. Placeholders fail closed: every inbound request is refused until real keys are pinned. Pull mode keeps working meanwhile, since it only uses outbound calls.
+
+Each request carries four headers:
+
+| Header | Value |
+|---|---|
+| `X-Pardesign-Key-Id` | id of the signing key, e.g. `b1-2026` |
+| `X-Pardesign-Timestamp` | unix time in seconds; accepted within ±300 s of the site clock |
+| `X-Pardesign-Nonce` | random, 16–128 chars of `[A-Za-z0-9_-]`, unique per request (single use, remembered 15 min) |
+| `X-Pardesign-Signature` | base64 Ed25519 detached signature of the message below |
+
+The signed message is seven lines joined with `\n` and no trailing newline: key id, timestamp, nonce, site id (the value the site sends as `X-Pardesign-Site`), HTTP method in upper case, REST route without the `/wp-json` prefix (e.g. `/pardesign-entretien/v1/run`), and the hex SHA-256 of the raw request body (an empty body hashes to `e3b0c442…b855`). Rejections come back as `401` with a code (`missing_signature`, `untrusted_key`, `stale_timestamp`, `bad_nonce`, `bad_signature`, `replay`) or `403 https_required`.
+
+Node example for the backend (`PARDESIGN_SIGNING_KEY` is the PKCS#8 base64 private key printed by the generator):
+
+```js
+import { createPrivateKey, createHash, randomBytes, sign } from 'node:crypto';
+
+const key = createPrivateKey({ key: Buffer.from(process.env.PARDESIGN_SIGNING_KEY, 'base64'), format: 'der', type: 'pkcs8' });
+
+export function signedHeaders(siteId, method, route, body = '') {
+  const keyId = process.env.PARDESIGN_SIGNING_KEY_ID; // e.g. "b1-2026"
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const nonce = randomBytes(24).toString('base64url');
+  const bodyHash = createHash('sha256').update(body, 'utf8').digest('hex');
+  const message = [keyId, timestamp, nonce, siteId, method.toUpperCase(), route, bodyHash].join('\n');
+  return {
+    'X-Pardesign-Key-Id': keyId,
+    'X-Pardesign-Timestamp': timestamp,
+    'X-Pardesign-Nonce': nonce,
+    'X-Pardesign-Signature': sign(null, Buffer.from(message, 'utf8'), key).toString('base64'),
+  };
+}
+// fetch(`${siteUrl}/wp-json/pardesign-entretien/v1/run`, { method: 'POST', body, headers: { 'Content-Type': 'application/json', ...signedHeaders(siteId, 'POST', '/pardesign-entretien/v1/run', body) } })
+```
+
+Deployment order: pin the public key in a plugin release first, then switch the backend to signed requests once every site runs that release. Sites still on an older plugin only understand the Bearer header, so the backend can send both during the transition.
+
+Inbound calls require TLS (`is_ssl()`); a site behind a proxy that terminates TLS must set `$_SERVER['HTTPS'] = 'on'` in `wp-config.php` when `X-Forwarded-Proto` is `https`. For local development only, `add_filter( 'pardesign_entretien_allow_insecure_rest', '__return_true' )` disables the check.
+
 ## Configuration
 
 Settings are available under **Tools → Entretien PAR Design**, or as constants in `wp-config.php` (handy to avoid storing the API key in the database):
@@ -52,7 +97,9 @@ Settings are available under **Tools → Entretien PAR Design**, or as constants
 | ClickUp task ID | `PARDESIGN_ENTRETIEN_CLICKUP_TASK_ID` |
 | ClickUp email field ID | `PARDESIGN_ENTRETIEN_CLICKUP_EMAIL_FIELD_ID` |
 
-The default backend URL is `https://entretiens.pardesign.net`. The default site identifier is the site's hostname.
+The default backend URL is `https://entretiens.pardesign.net`; only `https://` URLs are accepted and used. The default site identifier is the site's hostname.
+
+On multisite, settings are network options and the page and endpoints require `manage_network_options`, because the automatic run updates core and plugins for the whole network.
 
 ## Releases
 
@@ -126,9 +173,13 @@ includes/
   class-server-audit.php       Server audit data collection
   class-backup.php             Database backup (mysqldump or PHP dump)
   class-api-client.php         HTTP client to the PAR Design backend
+  class-inbound-auth.php       Ed25519 verification of backend → site requests
+  class-lock.php               One-run-at-a-time lock
   class-entretien.php          Visit orchestration (manual + automatic)
   class-rest.php               REST endpoints driven by the backend
   class-admin-ui.php           Admin page
   class-updater.php            Plugin self-update from the backend
   class-cli.php                WP-CLI commands
+uninstall.php                  Removes dumps, options and scheduled events on uninstall
+tools/                         Release tooling (key generation, signing, build)
 ```

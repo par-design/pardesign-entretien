@@ -29,7 +29,7 @@ class Pardesign_Entretien_Settings {
 			return constant( $constants[ $key ] );
 		}
 
-		$settings = get_option( self::OPTION, array() );
+		$settings = self::read();
 		if ( isset( $settings[ $key ] ) && '' !== $settings[ $key ] ) {
 			return $settings[ $key ];
 		}
@@ -49,8 +49,38 @@ class Pardesign_Entretien_Settings {
 	}
 
 	public static function update( array $values ): void {
-		$settings = get_option( self::OPTION, array() );
-		update_option( self::OPTION, array_merge( $settings, $values ) );
+		$settings = array_merge( self::read(), $values );
+		if ( is_multisite() ) {
+			update_site_option( self::OPTION, $settings );
+		} else {
+			update_option( self::OPTION, $settings );
+		}
+	}
+
+	/**
+	 * Stored settings. On multisite they are network-wide (the REST endpoints update core and
+	 * plugins network-wide, so only a network administrator may configure them); a value left
+	 * in a site option by an older version is still read as a fallback.
+	 */
+	private static function read(): array {
+		if ( is_multisite() ) {
+			$network = get_site_option( self::OPTION, array() );
+			if ( is_array( $network ) && ! empty( $network ) ) {
+				return $network;
+			}
+		}
+		$local = get_option( self::OPTION, array() );
+		return is_array( $local ) ? $local : array();
+	}
+
+	/** Capability required to configure and drive the plugin. */
+	public static function capability(): string {
+		return is_multisite() ? 'manage_network_options' : 'manage_options';
+	}
+
+	/** True when the API key comes from a wp-config.php constant (cannot be rotated remotely). */
+	public static function api_key_is_constant(): bool {
+		return defined( 'PARDESIGN_ENTRETIEN_API_KEY' );
 	}
 
 	public static function is_configured(): bool {

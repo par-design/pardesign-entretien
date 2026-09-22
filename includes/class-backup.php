@@ -20,6 +20,15 @@ class Pardesign_Entretien_Backup {
 	/** Nombre de sauvegardes conservées sur disque. */
 	const KEEP = 3;
 
+	/** Option holding the random per-site directory token (autoload off). */
+	const DIR_OPTION = 'pardesign_entretien_backup_dir';
+
+	/** Prefix of the backup directory inside uploads; the random token follows. */
+	const DIR_PREFIX = 'pardesign-entretien-';
+
+	/** Fixed directory name used by versions <= 0.8.0, migrated on first run and removed. */
+	const LEGACY_DIRNAME = 'pardesign-entretien-backups';
+
 	/** Taille du tampon d'écriture gzip (~1 Mo). */
 	const FLUSH_BYTES = 1048576;
 
@@ -97,6 +106,7 @@ class Pardesign_Entretien_Backup {
 				return self::finalize( $result, $started );
 			}
 
+			@chmod( $file, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 			$result['ok']         = true;
 			$result['file']       = $file;
 			$result['size_bytes'] = $size;
@@ -114,10 +124,11 @@ class Pardesign_Entretien_Backup {
 	 * @return array{file:string,size_bytes:int,taken_at:string}|null
 	 */
 	public static function last() {
-		$uploads = wp_upload_dir();
-		$dir     = trailingslashit( $uploads['basedir'] ) . 'pardesign-entretien-backups';
-		$files   = array_merge( (array) glob( $dir . '/*.sql.gz' ), (array) glob( $dir . '/*.sql' ) );
-		$files   = array_filter( $files );
+		$dir = self::dir_path();
+		if ( ! $dir || ! is_dir( $dir ) ) {
+			return null;
+		}
+		$files = array_filter( array_merge( (array) glob( $dir . '/*.sql.gz' ), (array) glob( $dir . '/*.sql' ) ) );
 		if ( empty( $files ) ) {
 			return null;
 		}
@@ -141,28 +152,129 @@ class Pardesign_Entretien_Backup {
 		return $result;
 	}
 
-	/** Dossier de destination protégé. @return string|WP_Error */
+	/**
+	 * Path of the backup directory: {uploads}/pardesign-entretien-{random token}. The token is
+	 * generated once per site and stored in an option, so the directory name is unguessable
+	 * and never reported anywhere (the backend only ever receives file basenames).
+	 *
+	 * @param bool $create Generate the token when missing.
+	 * @return string|null Absolute path without trailing slash, null when not yet created.
+	 */
+	public static function dir_path( bool $create = false ) {
+		$token = (string) get_option( self::DIR_OPTION, '' );
+		if ( ! preg_match( '/^[A-Za-z0-9]{32}$/', $token ) ) {
+			if ( ! $create ) {
+				return null;
+			}
+			$token = wp_generate_password( 32, false, false );
+			add_option( self::DIR_OPTION, $token, '', 'no' );
+			$token = (string) get_option( self::DIR_OPTION, $token ); // another request may have won the race
+		}
+		$uploads = wp_upload_dir( null, false );
+		return trailingslashit( $uploads['basedir'] ) . self::DIR_PREFIX . $token;
+	}
+
+	/**
+	 * Dossier de destination protégé : nom aléatoire, mode 0700, fichiers de garde pour
+	 * Apache (.htaccess), IIS (web.config) et l'index. Sous nginx, seul le nom imprévisible
+	 * protège ; le chmod n'arrête pas le serveur web lui-même (même utilisateur), seulement
+	 * les autres comptes d'un hébergement mutualisé.
+	 *
+	 * @return string|WP_Error
+	 */
 	private static function ensure_dir() {
 		$uploads = wp_upload_dir();
 		if ( ! empty( $uploads['error'] ) ) {
 			return new WP_Error( 'backup_dir', $uploads['error'] );
 		}
-		$dir = trailingslashit( $uploads['basedir'] ) . 'pardesign-entretien-backups';
+		$dir = self::dir_path( true );
 		if ( ! wp_mkdir_p( $dir ) ) {
 			return new WP_Error( 'backup_dir', __( 'Impossible de créer le dossier de sauvegardes.', 'pardesign-entretien' ) );
 		}
+		@chmod( $dir, 0700 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		if ( ! is_writable( $dir ) ) {
 			return new WP_Error( 'backup_dir', __( 'Dossier de sauvegardes non inscriptible.', 'pardesign-entretien' ) );
 		}
-		// Protection d'accès direct — la vraie protection reste le nom imprévisible
-		// (le .htaccess est inerte sous nginx).
-		if ( ! file_exists( $dir . '/index.php' ) ) {
-			@file_put_contents( $dir . '/index.php', "<?php // Silence.\n" );
-		}
-		if ( ! file_exists( $dir . '/.htaccess' ) ) {
-			@file_put_contents( $dir . '/.htaccess', "Require all denied\n<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n" );
-		}
+		self::write_guards( $dir );
+		self::migrate_legacy_dir( $dir );
 		return $dir;
+	}
+
+	/** Guard files blocking direct HTTP access where the web server honours them. */
+	private static function write_guards( string $dir ): void {
+		$guards = array(
+			'index.php'  => "<?php // Silence.\n",
+			'.htaccess'  => "<IfModule mod_authz_core.c>\n\tRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder deny,allow\n\tDeny from all\n</IfModule>\n",
+			'web.config' => "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\t<system.webServer>\n\t\t<security>\n\t\t\t<requestFiltering>\n\t\t\t\t<fileExtensions>\n\t\t\t\t\t<add fileExtension=\".sql\" allowed=\"false\" />\n\t\t\t\t\t<add fileExtension=\".gz\" allowed=\"false\" />\n\t\t\t\t\t<add fileExtension=\".cnf\" allowed=\"false\" />\n\t\t\t\t</fileExtensions>\n\t\t\t</requestFiltering>\n\t\t</security>\n\t</system.webServer>\n</configuration>\n",
+		);
+		foreach ( $guards as $name => $content ) {
+			if ( ! file_exists( $dir . '/' . $name ) ) {
+				@file_put_contents( $dir . '/' . $name, $content ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			}
+		}
+	}
+
+	/** Move dumps left by <= 0.8.0 in the fixed-name directory into the private one, then remove it. */
+	private static function migrate_legacy_dir( string $dir ): void {
+		$uploads = wp_upload_dir( null, false );
+		$legacy  = trailingslashit( $uploads['basedir'] ) . self::LEGACY_DIRNAME;
+		if ( ! is_dir( $legacy ) || realpath( $legacy ) === realpath( $dir ) ) {
+			return;
+		}
+		foreach ( array_merge( (array) glob( $legacy . '/*.sql.gz' ), (array) glob( $legacy . '/*.sql' ) ) as $old ) {
+			if ( $old && @rename( $old, $dir . '/' . basename( $old ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				@chmod( $dir . '/' . basename( $old ), 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			}
+		}
+		self::remove_dir( $legacy );
+	}
+
+	/** Create an empty file in mode 0600 so it is never world-readable, even while being written. */
+	private static function create_private_file( string $path ): bool {
+		$fh = @fopen( $path, 'wb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		if ( ! $fh ) {
+			return false;
+		}
+		fclose( $fh );
+		@chmod( $path, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		return true;
+	}
+
+	/** Delete every regular file of a directory (dumps, guards, temp files) and the directory itself. */
+	private static function remove_dir( string $dir ): void {
+		if ( ! is_dir( $dir ) ) {
+			return;
+		}
+		foreach ( (array) glob( $dir . '/{,.}*', GLOB_BRACE ) as $entry ) {
+			if ( $entry && is_file( $entry ) ) {
+				@unlink( $entry ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			}
+		}
+		@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+	}
+
+	/**
+	 * Uninstall: delete every dump, the private directory (and the legacy one) and the token.
+	 *
+	 * @return int Number of dump files deleted.
+	 */
+	public static function delete_all(): int {
+		$count   = 0;
+		$uploads = wp_upload_dir( null, false );
+		$dirs    = array( trailingslashit( $uploads['basedir'] ) . self::LEGACY_DIRNAME );
+		$private = self::dir_path();
+		if ( $private ) {
+			$dirs[] = $private;
+		}
+		foreach ( $dirs as $dir ) {
+			if ( ! is_dir( $dir ) ) {
+				continue;
+			}
+			$count += count( array_filter( array_merge( (array) glob( $dir . '/*.sql.gz' ), (array) glob( $dir . '/*.sql' ) ) ) );
+			self::remove_dir( $dir );
+		}
+		delete_option( self::DIR_OPTION );
+		return $count;
 	}
 
 	/** Chemin cible avec suffixe aléatoire (nom imprévisible). */
@@ -269,12 +381,25 @@ class Pardesign_Entretien_Backup {
 			return new WP_Error( 'backup_mysqldump', __( 'Binaire mysqldump introuvable.', 'pardesign-entretien' ) );
 		}
 
-		$dir      = dirname( $file );
-		$defaults = $dir . '/.defaults-' . wp_generate_password( 12, false, false ) . '.cnf';
-		$sql_tmp  = preg_replace( '/\.gz$/', '', $file );
+		$sql_tmp = preg_replace( '/\.gz$/', '', $file );
+
+		// Credentials file: outside the web root (system temp dir), created by tempnam() in mode
+		// 0600, removed in finally AND by a shutdown function so a killed process leaves nothing.
+		$defaults = tempnam( get_temp_dir(), 'pdcnf' );
+		if ( false === $defaults ) {
+			return new WP_Error( 'backup_mysqldump', __( 'Impossible de créer le fichier de connexion temporaire.', 'pardesign-entretien' ) );
+		}
+		@chmod( $defaults, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		register_shutdown_function(
+			static function () use ( $defaults ) {
+				if ( file_exists( $defaults ) ) {
+					@unlink( $defaults ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				}
+			}
+		);
 
 		$conn  = self::parse_db_host();
-		$lines = array( '[client]', 'user=' . DB_USER, 'password=' . DB_PASSWORD );
+		$lines = array( '[client]', 'user=' . self::cnf_quote( DB_USER ), 'password=' . self::cnf_quote( DB_PASSWORD ) );
 		if ( $conn['socket'] ) {
 			$lines[] = 'socket=' . $conn['socket'];
 		} else {
@@ -287,9 +412,10 @@ class Pardesign_Entretien_Backup {
 		if ( false === @file_put_contents( $defaults, implode( "\n", $lines ) . "\n" ) ) {
 			return new WP_Error( 'backup_mysqldump', __( 'Impossible d’écrire le fichier de connexion temporaire.', 'pardesign-entretien' ) );
 		}
-		@chmod( $defaults, 0600 );
 
 		try {
+			// mysqldump truncates an existing --result-file, so creating it first keeps mode 0600.
+			self::create_private_file( $sql_tmp );
 			$cmd = escapeshellarg( $bin )
 				. ' --defaults-extra-file=' . escapeshellarg( $defaults )
 				. ' --single-transaction --quick --no-tablespaces --skip-lock-tables'
@@ -321,6 +447,11 @@ class Pardesign_Entretien_Backup {
 		}
 	}
 
+	/** Quote a value for a MySQL option file (double quotes; backslash and quote escaped). */
+	private static function cnf_quote( string $value ): string {
+		return '"' . str_replace( array( '\\', '"' ), array( '\\\\', '\\"' ), $value ) . '"';
+	}
+
 	/** Compresse un fichier en flux (blocs de 512 Ko). @return true|WP_Error */
 	private static function gzip_file( $src, $dest ) {
 		if ( ! function_exists( 'gzopen' ) ) {
@@ -333,6 +464,7 @@ class Pardesign_Entretien_Backup {
 		if ( ! $in ) {
 			return new WP_Error( 'backup_gzip', __( 'Lecture du dump temporaire impossible.', 'pardesign-entretien' ) );
 		}
+		self::create_private_file( $dest );
 		$out = @gzopen( $dest, 'wb6' );
 		if ( ! $out ) {
 			fclose( $in );
@@ -364,6 +496,7 @@ class Pardesign_Entretien_Backup {
 		if ( ! $use_gz ) {
 			$file = preg_replace( '/\.gz$/', '', $file );
 		}
+		self::create_private_file( $file );
 		$out = $use_gz ? @gzopen( $file, 'wb6' ) : @fopen( $file, 'wb' );
 		if ( ! $out ) {
 			return new WP_Error( 'backup_php', __( 'Impossible d’ouvrir le fichier de sauvegarde en écriture.', 'pardesign-entretien' ) );

@@ -11,6 +11,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class Pardesign_Entretien_Admin_UI {
 
+	/**
+	 * Value rendered in the API key field when a key is set. The real key never reaches the
+	 * page HTML (readable by any script or extension in the admin's browser). On save, this
+	 * value or an empty field means "keep the current key".
+	 */
+	const KEY_PLACEHOLDER = 'password-is-set';
+
+	/** Transient prefix of the one-shot notice shown after a redirect, keyed by user id. */
+	const NOTICE_TRANSIENT = 'pardesign_entretien_notice_';
+
 	public function hooks(): void {
 		add_action( 'admin_menu', array( $this, 'menu' ) );
 		add_action( 'admin_post_pardesign_entretien_save', array( $this, 'handle_save' ) );
@@ -21,18 +31,23 @@ class Pardesign_Entretien_Admin_UI {
 		add_management_page(
 			__( 'Entretien PAR Design', 'pardesign-entretien' ),
 			__( 'Entretien PAR Design', 'pardesign-entretien' ),
-			'manage_options',
+			Pardesign_Entretien_Settings::capability(),
 			'pardesign-entretien',
 			array( $this, 'render' )
 		);
 	}
 
 	public function render(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( Pardesign_Entretien_Settings::capability() ) ) {
 			return;
 		}
 		$current = Pardesign_Entretien::current();
-		$notice  = isset( $_GET['msg'] ) ? sanitize_text_field( wp_unslash( $_GET['msg'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		// One-shot notice left by handle_save()/handle_action(); never taken from the URL, so a
+		// crafted link cannot display an arbitrary message to an administrator.
+		$notice = (string) get_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
+		if ( '' !== $notice ) {
+			delete_transient( self::NOTICE_TRANSIENT . get_current_user_id() );
+		}
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Entretien PAR Design', 'pardesign-entretien' ); ?></h1>
@@ -96,7 +111,14 @@ class Pardesign_Entretien_Admin_UI {
 					</tr>
 					<tr>
 						<th scope="row"><label for="api_key"><?php esc_html_e( 'Clé API du site', 'pardesign-entretien' ); ?></label></th>
-						<td><input name="api_key" id="api_key" type="password" class="regular-text" value="<?php echo esc_attr( Pardesign_Entretien_Settings::get( 'api_key' ) ); ?>" autocomplete="off"></td>
+						<td>
+							<input name="api_key" id="api_key" type="password" class="regular-text" value="<?php echo '' !== (string) Pardesign_Entretien_Settings::get( 'api_key' ) ? esc_attr( self::KEY_PLACEHOLDER ) : ''; ?>" autocomplete="new-password">
+							<?php if ( Pardesign_Entretien_Settings::api_key_is_constant() ) : ?>
+								<p class="description"><?php esc_html_e( 'Définie par la constante PARDESIGN_ENTRETIEN_API_KEY dans wp-config.php ; la valeur saisie ici est ignorée.', 'pardesign-entretien' ); ?></p>
+							<?php else : ?>
+								<p class="description"><?php esc_html_e( 'Laissez tel quel pour conserver la clé actuelle ; saisissez une nouvelle valeur pour la remplacer.', 'pardesign-entretien' ); ?></p>
+							<?php endif; ?>
+						</td>
 					</tr>
 					<tr>
 						<th scope="row"><label for="site_id"><?php esc_html_e( 'Identifiant du site', 'pardesign-entretien' ); ?></label></th>
@@ -124,7 +146,7 @@ class Pardesign_Entretien_Admin_UI {
 	}
 
 	public function handle_save(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( Pardesign_Entretien_Settings::capability() ) ) {
 			wp_die( esc_html__( 'Accès refusé.', 'pardesign-entretien' ) );
 		}
 		check_admin_referer( 'pardesign_entretien_save' );
@@ -132,10 +154,25 @@ class Pardesign_Entretien_Admin_UI {
 		$clickup_task_id        = isset( $_POST['clickup_task_id'] ) ? sanitize_text_field( wp_unslash( $_POST['clickup_task_id'] ) ) : '';
 		$clickup_email_field_id = isset( $_POST['clickup_email_field_id'] ) ? sanitize_text_field( wp_unslash( $_POST['clickup_email_field_id'] ) ) : '';
 
+		// Backend URL: HTTPS only (the API key travels in a header). An invalid value keeps the
+		// previous setting and is reported instead of being stored.
+		$backend_url = isset( $_POST['backend_url'] ) ? esc_url_raw( wp_unslash( $_POST['backend_url'] ) ) : '';
+		$url_error   = '';
+		if ( '' !== $backend_url && ( 0 !== strpos( $backend_url, 'https://' ) || ! wp_http_validate_url( $backend_url ) ) ) {
+			$url_error   = __( 'URL du backend refusée : elle doit commencer par https://.', 'pardesign-entretien' );
+			$backend_url = (string) Pardesign_Entretien_Settings::get( 'backend_url' );
+		}
+
+		// API key: the field shows a placeholder, never the key. Empty or placeholder = keep.
+		$submitted_key = isset( $_POST['api_key'] ) ? sanitize_text_field( wp_unslash( $_POST['api_key'] ) ) : '';
+		$api_key       = ( '' === $submitted_key || self::KEY_PLACEHOLDER === $submitted_key )
+			? (string) Pardesign_Entretien_Settings::get( 'api_key' )
+			: $submitted_key;
+
 		Pardesign_Entretien_Settings::update(
 			array(
-				'backend_url'            => isset( $_POST['backend_url'] ) ? esc_url_raw( wp_unslash( $_POST['backend_url'] ) ) : '',
-				'api_key'                => isset( $_POST['api_key'] ) ? sanitize_text_field( wp_unslash( $_POST['api_key'] ) ) : '',
+				'backend_url'            => $backend_url,
+				'api_key'                => $api_key,
 				'site_id'                => isset( $_POST['site_id'] ) ? sanitize_text_field( wp_unslash( $_POST['site_id'] ) ) : '',
 				'clickup_task_id'        => $clickup_task_id,
 				'clickup_email_field_id' => $clickup_email_field_id,
@@ -143,6 +180,9 @@ class Pardesign_Entretien_Admin_UI {
 		);
 
 		$msg = __( 'Configuration enregistrée.', 'pardesign-entretien' );
+		if ( '' !== $url_error ) {
+			$msg .= ' ' . $url_error;
+		}
 
 		// Synchronise le mapping ClickUp vers le backend (si configuré).
 		if ( Pardesign_Entretien_Settings::is_configured() ) {
@@ -159,7 +199,7 @@ class Pardesign_Entretien_Admin_UI {
 	}
 
 	public function handle_action(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( Pardesign_Entretien_Settings::capability() ) ) {
 			wp_die( esc_html__( 'Accès refusé.', 'pardesign-entretien' ) );
 		}
 		check_admin_referer( 'pardesign_entretien_action' );
@@ -191,8 +231,10 @@ class Pardesign_Entretien_Admin_UI {
 		$this->redirect( $msg );
 	}
 
+	/** Stores the message for the current user (60 s) and redirects to the page without any query parameter. */
 	private function redirect( string $msg ): void {
-		wp_safe_redirect( add_query_arg( 'msg', rawurlencode( $msg ), admin_url( 'tools.php?page=pardesign-entretien' ) ) );
+		set_transient( self::NOTICE_TRANSIENT . get_current_user_id(), $msg, MINUTE_IN_SECONDS );
+		wp_safe_redirect( admin_url( 'tools.php?page=pardesign-entretien' ) );
 		exit;
 	}
 }

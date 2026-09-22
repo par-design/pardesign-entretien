@@ -71,7 +71,12 @@ class Pardesign_Entretien_Api_Client {
 			return new WP_Error( 'not_configured', __( 'Le backend PAR Design n’est pas configuré.', 'pardesign-entretien' ) );
 		}
 
-		$url = rtrim( (string) Pardesign_Entretien_Settings::get( 'backend_url' ), '/' ) . $path;
+		$base = rtrim( (string) Pardesign_Entretien_Settings::get( 'backend_url' ), '/' );
+		if ( 0 !== strpos( $base, 'https://' ) ) {
+			// The API key travels in a header: never over plain HTTP.
+			return new WP_Error( 'insecure_backend', __( 'L’URL du backend doit utiliser HTTPS.', 'pardesign-entretien' ) );
+		}
+		$url = $base . $path;
 
 		$response = wp_remote_post(
 			$url,

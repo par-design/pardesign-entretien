@@ -1,8 +1,9 @@
 <?php
 /**
  * Endpoints REST pilotés par le backend PAR Design (Vercel Cron ou bouton
- * « Lancer maintenant »). Authentifiés par la clé API du site (secret symétrique :
- * la même clé sert pour les appels plugin → backend ET backend → plugin).
+ * « Lancer maintenant »). Authentifiés par signature Ed25519 du backend (voir
+ * class-inbound-auth.php) : rien de stocké sur le site ne permet de forger un appel
+ * entrant. La clé API du site ne sert qu'aux appels sortants plugin → backend.
  *
  * @package PardesignEntretien
  */
@@ -19,6 +20,9 @@ class Pardesign_Entretien_Rest {
 
 	/** Polling « pull » : interroge le backend pour savoir s'il faut lancer un entretien. */
 	const POLL_HOOK = 'pardesign_entretien_poll';
+
+	/** Forme acceptée d'un identifiant d'entretien (JSON-schema pattern, sans délimiteurs). */
+	const ENTRETIEN_ID_PATTERN = '^[A-Za-z0-9._-]{1,128}$';
 
 	public function hooks(): void {
 		add_action( 'rest_api_init', array( $this, 'register_routes' ) );
@@ -56,9 +60,13 @@ class Pardesign_Entretien_Rest {
 		if ( ! in_array( $scope, array( 'full', 'plugins', 'none' ), true ) ) {
 			$scope = 'full';
 		}
-		$entretien_id = ! empty( $res['entretien_id'] )
+		$entretien_id = ! empty( $res['entretien_id'] ) && preg_match( '/' . self::ENTRETIEN_ID_PATTERN . '/', (string) $res['entretien_id'] )
 			? (string) $res['entretien_id']
 			: Pardesign_Entretien::new_id();
+		// Un entretien est déjà en cours (ou programmé) : on réessaiera au prochain passage.
+		if ( ! Pardesign_Entretien_Lock::acquire( $entretien_id, 'scheduled' ) ) {
+			return;
+		}
 		// send TOUJOURS false : jamais d'envoi automatique, validation humaine au backend.
 		wp_schedule_single_event( time(), self::ASYNC_HOOK, array( false, $scope, $entretien_id ) );
 		self::nudge_cron();
@@ -72,9 +80,14 @@ class Pardesign_Entretien_Rest {
 				'methods'             => 'POST',
 				'callback'            => array( $this, 'handle_run' ),
 				'permission_callback' => array( $this, 'authorize' ),
+				'show_in_index'       => false,
 				'args'                => array(
 					'send'  => array( 'type' => 'boolean', 'default' => true ),
-					'scope' => array( 'type' => 'string', 'default' => 'full' ),
+					'scope' => array(
+						'type'    => 'string',
+						'default' => 'full',
+						'enum'    => array( 'full', 'plugins', 'none' ),
+					),
 				),
 			)
 		);
@@ -86,8 +99,13 @@ class Pardesign_Entretien_Rest {
 				'methods'             => 'POST',
 				'callback'            => array( $this, 'handle_recover' ),
 				'permission_callback' => array( $this, 'authorize' ),
+				'show_in_index'       => false,
 				'args'                => array(
-					'entretien_id' => array( 'type' => 'string', 'required' => true ),
+					'entretien_id' => array(
+						'type'     => 'string',
+						'required' => true,
+						'pattern'  => self::ENTRETIEN_ID_PATTERN,
+					),
 					'send'         => array( 'type' => 'boolean', 'default' => false ),
 				),
 			)
@@ -100,6 +118,7 @@ class Pardesign_Entretien_Rest {
 				'methods'             => 'POST',
 				'callback'            => array( $this, 'handle_audit_data' ),
 				'permission_callback' => array( $this, 'authorize' ),
+				'show_in_index'       => false,
 			)
 		);
 
@@ -110,19 +129,44 @@ class Pardesign_Entretien_Rest {
 				'methods'             => 'POST',
 				'callback'            => array( $this, 'handle_self_update' ),
 				'permission_callback' => array( $this, 'authorize' ),
+				'show_in_index'       => false,
+			)
+		);
+
+		register_rest_route(
+			self::NAMESPACE,
+			'/rotate-key',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'handle_rotate_key' ),
+				'permission_callback' => array( $this, 'authorize' ),
+				'show_in_index'       => false,
+				'args'                => array(
+					'api_key' => array(
+						'type'     => 'string',
+						'required' => true,
+						'pattern'  => '^[A-Za-z0-9_\\-]{32,128}$',
+					),
+				),
 			)
 		);
 	}
 
-	/** Bearer = clé API du site (comparaison à temps constant). */
-	public function authorize( WP_REST_Request $request ): bool {
-		$expected = (string) Pardesign_Entretien_Settings::get( 'api_key' );
-		if ( '' === $expected ) {
-			return false;
+	/**
+	 * Requête entrante signée par le backend (Ed25519 + horodatage + nonce), sur TLS.
+	 * Un WP_Error explique le refus au backend (statut 401 / 403).
+	 *
+	 * @return true|WP_Error
+	 */
+	public function authorize( WP_REST_Request $request ) {
+		/**
+		 * Local development only: allow inbound calls without TLS. Sites behind a proxy that
+		 * terminates TLS should instead set $_SERVER['HTTPS'] in wp-config.php so is_ssl() is true.
+		 */
+		if ( ! is_ssl() && ! apply_filters( 'pardesign_entretien_allow_insecure_rest', false ) ) {
+			return new WP_Error( 'https_required', 'Inbound requests must use HTTPS.', array( 'status' => 403 ) );
 		}
-		$header = (string) $request->get_header( 'authorization' );
-		$token  = ( 0 === stripos( $header, 'bearer ' ) ) ? trim( substr( $header, 7 ) ) : '';
-		return '' !== $token && hash_equals( $expected, $token );
+		return Pardesign_Entretien_Inbound_Auth::verify( $request );
 	}
 
 	public function handle_run( WP_REST_Request $request ) {
@@ -132,9 +176,23 @@ class Pardesign_Entretien_Rest {
 			$scope = 'full';
 		}
 
+		// Un seul entretien à la fois : le verrou est pris ici (atomique) et libéré en fin de run.
+		$entretien_id = Pardesign_Entretien::new_id();
+		if ( ! Pardesign_Entretien_Lock::acquire( $entretien_id, 'scheduled' ) ) {
+			$current = Pardesign_Entretien_Lock::current();
+			return new WP_REST_Response(
+				array(
+					'error'        => 'Un entretien est déjà en cours.',
+					'entretien_id' => $current ? $current['entretien_id'] : null,
+					'stage'        => $current ? $current['stage'] : null,
+					'started_at'   => $current ? gmdate( 'c', (int) $current['started_at'] ) : null,
+				),
+				409
+			);
+		}
+
 		// L'entretien (snapshots + màj + rapport) peut durer plusieurs minutes :
 		// on le programme en arrière-plan et on répond IMMÉDIATEMENT au backend.
-		$entretien_id = Pardesign_Entretien::new_id();
 		wp_schedule_single_event( time(), self::ASYNC_HOOK, array( $send, $scope, $entretien_id ) );
 		self::nudge_cron();
 
@@ -181,6 +239,22 @@ class Pardesign_Entretien_Rest {
 			return new WP_REST_Response( array( 'error' => $result->get_error_message() ), 500 );
 		}
 		return new WP_REST_Response( array( 'ok' => true, 'entretien_id' => $id, 'report' => $result ), 200 );
+	}
+
+	/**
+	 * Rotation de la clé API sortante, pilotée par le backend (requête signée). Permet de
+	 * fermer une fuite sans intervention manuelle sur le site. Refusé si la clé est définie
+	 * en constante dans wp-config.php.
+	 */
+	public function handle_rotate_key( WP_REST_Request $request ) {
+		if ( Pardesign_Entretien_Settings::api_key_is_constant() ) {
+			return new WP_REST_Response(
+				array( 'ok' => false, 'error' => 'La clé API est définie dans wp-config.php (PARDESIGN_ENTRETIEN_API_KEY) ; rotation manuelle requise.' ),
+				409
+			);
+		}
+		Pardesign_Entretien_Settings::update( array( 'api_key' => (string) $request->get_param( 'api_key' ) ) );
+		return new WP_REST_Response( array( 'ok' => true, 'rotated_at' => gmdate( 'c' ) ), 200 );
 	}
 
 	/** Collecte et pousse les données serveur, et les renvoie au backend appelant. */

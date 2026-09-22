@@ -3,7 +3,7 @@
  * Plugin Name:       PAR Design — Entretien
  * Plugin URI:        https://pardesign.net
  * Description:        Capture l'état des versions (coeur WordPress + plugins) avant et après un entretien, puis déclenche l'envoi du rapport client via le backend PAR Design.
- * Version:           0.8.0
+ * Version:           0.9.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            PAR Design
@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PARDESIGN_ENTRETIEN_VERSION', '0.8.0' );
+define( 'PARDESIGN_ENTRETIEN_VERSION', '0.9.0' );
 define( 'PARDESIGN_ENTRETIEN_FILE', __FILE__ );
 define( 'PARDESIGN_ENTRETIEN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -28,6 +28,8 @@ require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-snapshot.php';
 require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-server-audit.php';
 require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-backup.php';
 require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-api-client.php';
+require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-lock.php';
+require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-inbound-auth.php';
 require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-entretien.php';
 require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-rest.php';
 require_once PARDESIGN_ENTRETIEN_DIR . 'includes/class-admin-ui.php';
@@ -48,10 +50,15 @@ add_action(
 	}
 );
 
-// Nettoyage du polling « pull » à la désactivation (sinon événement cron orphelin).
+// Nettoyage à la désactivation : polling « pull » et entretiens programmés (sinon
+// événements cron orphelins), et verrou d'exécution.
 register_deactivation_hook(
 	__FILE__,
 	static function () {
-		wp_clear_scheduled_hook( Pardesign_Entretien_Rest::POLL_HOOK );
+		// wp_unschedule_hook() drops every event of the hook whatever its arguments;
+		// wp_clear_scheduled_hook() would only match events scheduled without arguments.
+		wp_unschedule_hook( Pardesign_Entretien_Rest::POLL_HOOK );
+		wp_unschedule_hook( Pardesign_Entretien_Rest::ASYNC_HOOK );
+		delete_option( Pardesign_Entretien_Lock::OPTION );
 	}
 );

@@ -86,6 +86,17 @@ class Pardesign_Entretien {
 			$entretien_id = self::generate_id();
 		}
 
+		// Verrou de site : pris à la programmation (REST / poll) ou ici pour un appel direct ;
+		// refuse de démarrer si un autre entretien le détient.
+		if ( ! Pardesign_Entretien_Lock::acquire( $entretien_id, 'running' ) ) {
+			$current = Pardesign_Entretien_Lock::current();
+			return new WP_Error(
+				'locked',
+				sprintf( 'Un entretien est déjà en cours (%s).', $current ? $current['entretien_id'] : '?' )
+			);
+		}
+		Pardesign_Entretien_Lock::refresh( $entretien_id, 'running' );
+
 		// La màj du cœur (téléchargement + extraction + upgrade DB) dépasse souvent
 		// le max_execution_time du host. Sans ce garde-fou, PHP tue le process en
 		// plein milieu : pas de snapshot « après », pas de rapport, et les màj de
@@ -95,6 +106,7 @@ class Pardesign_Entretien {
 		$before = Pardesign_Entretien_Snapshot::capture();
 		$pushed = Pardesign_Entretien_Api_Client::push_snapshot( $entretien_id, 'before', $before );
 		if ( is_wp_error( $pushed ) ) {
+			Pardesign_Entretien_Lock::release( $entretien_id );
 			return $pushed;
 		}
 
@@ -112,6 +124,7 @@ class Pardesign_Entretien {
 				Pardesign_Entretien_Api_Client::push_snapshot( $entretien_id, 'after', $after );
 				// Sortie anormale : jamais d'envoi automatique au client, brouillon seulement.
 				Pardesign_Entretien_Api_Client::generate_report( $entretien_id, false );
+				Pardesign_Entretien_Lock::release( $entretien_id );
 			}
 		);
 
@@ -126,11 +139,13 @@ class Pardesign_Entretien {
 			'taken_at'   => gmdate( 'c' ),
 		);
 		if ( in_array( $scope, array( 'full', 'plugins' ), true ) ) {
+			Pardesign_Entretien_Lock::refresh( $entretien_id, 'backup' );
 			$backup = Pardesign_Entretien_Backup::run();
 		}
 
 		$update_errors = array();
 		if ( in_array( $scope, array( 'full', 'plugins' ), true ) ) {
+			Pardesign_Entretien_Lock::refresh( $entretien_id, 'updating' );
 			$update_errors = array_merge( $update_errors, self::update_all_plugins() );
 		}
 		// Résultat structuré de la màj du cœur (null si la portée n'inclut pas le
@@ -171,8 +186,9 @@ class Pardesign_Entretien {
 		$effective_send = $send && empty( $update_errors );
 		$report         = Pardesign_Entretien_Api_Client::generate_report( $entretien_id, $effective_send );
 
-		// Flux normal terminé : le filet de sécurité devient un no-op.
+		// Flux normal terminé : le filet de sécurité devient un no-op, le verrou est libéré.
 		$finalized = true;
+		Pardesign_Entretien_Lock::release( $entretien_id );
 
 		return array(
 			'entretien_id'  => $entretien_id,

@@ -29,6 +29,7 @@ In automatic mode (`run_auto`), the plugin backs up the database, updates plugin
   - `POST /rotate-key` — replaces the site's outbound API key (`api_key`, 32–128 chars of `[A-Za-z0-9_-]`), so a leaked key can be closed from the backend. Refused with `409` when the key is defined as a `wp-config.php` constant.
 - **Plugin self-update** from signed GitHub Releases through the standard WordPress update mechanism (plugins screen, WP-CLI, `/self-update`): the release manifest is Ed25519-signed with an offline key and the archive hash is verified before install (`class-updater.php`, see [Releases](#releases)).
 - **Admin page** to configure the backend and drive a manual visit (`class-admin-ui.php`).
+- **Content Security Policy** management from a dedicated Tools page: per-directive allow-lists, a per-request nonce injected into inline `<script>`/`<style>` tags, report-only mode, a token-gated capture of browser violation reports, and a background static scan of the site's own pages against the saved policy; see [Content Security Policy](#content-security-policy) (`class-csp*.php`).
 - **WP-CLI commands** matching the manual visit workflow from the command line (`class-cli.php`):
 
   ```
@@ -84,6 +85,18 @@ export function signedHeaders(siteId, method, route, body = '') {
 Deployment order: pin the public key in a plugin release first, then switch the backend to signed requests once every site runs that release. Sites still on an older plugin only understand the Bearer header, so the backend can send both during the transition.
 
 Inbound calls require TLS (`is_ssl()`); a site behind a proxy that terminates TLS must set `$_SERVER['HTTPS'] = 'on'` in `wp-config.php` when `X-Forwarded-Proto` is `https`. For local development only, `add_filter( 'pardesign_entretien_allow_insecure_rest', '__return_true' )` disables the check.
+
+## Content Security Policy
+
+The **Tools → Sécurité PAR Design** page (site administrators, `manage_options`) builds the site's `Content-Security-Policy` header. It is off by default and starts in **report-only** mode, so nothing is blocked until an administrator switches it on deliberately.
+
+- **Directives**: every fetch directive (`default-src`, `script-src`, `style-src`, `img-src`, `connect-src`, `frame-ancestors`, `object-src`, …) can be enabled with its own source list, plus the `upgrade-insecure-requests` / `block-all-mixed-content` flags and an optional `report-uri`. Newlines are stripped from every value, so a field can never inject a second header.
+- **Nonce**: when enabled on `script-src` / `style-src`, a random nonce is generated per request, added to the header and injected (via `WP_HTML_Tag_Processor`, WordPress ≥ 6.2) into inline `<script>` / `<style>` tags that have none — theme, plugins and blocks included. Full-page caches freeze the nonce and defeat it; the page warns when one is detected. `style=""` and `onclick=""` attributes are never nonce-able and stay governed by `style-src-attr` / `script-src-attr`.
+- **Capture**: "Visiter et capturer" opens a 10-minute window with a random token. Only the request carrying that token gets a `report-uri` pointing at `POST /pardesign-entretien/v1/csp-report?token=…`, which is public by design (browsers send reports unauthenticated) but rejects anything without the live token. Reports are grouped per directive and blocked resource, with a truncated sample always rendered as plain text, and a one-click "Autoriser" adds the origin to the right directive.
+- **Static scan**: a WP-Cron job fetches the home page plus configurable archives and posts, parses the HTML and records what the saved policy would block. It is a simulation, not a browser: anything a page's JavaScript does at runtime is invisible to it. Progress is polled over `GET /csp-scan/status`; the scan routes require `manage_options` and are hidden from the REST index.
+- **Admin area**: the policy applies to `wp-admin` only when "Appliquer aussi dans wp-admin" is checked, which is discouraged outside targeted tests.
+
+Everything the feature stores (policy, reports, scan configuration, notices) is removed on uninstall.
 
 ## Configuration
 
@@ -178,6 +191,10 @@ includes/
   class-entretien.php          Visit orchestration (manual + automatic)
   class-rest.php               REST endpoints driven by the backend
   class-admin-ui.php           Admin page
+  class-csp.php                CSP header, per-request nonce and inline tag injection
+  class-csp-reports.php        Token-gated collector for browser violation reports
+  class-csp-scanner.php        Background static scan of the site against the policy
+  class-csp-admin.php          "Sécurité PAR Design" Tools page
   class-updater.php            Plugin self-update from the backend
   class-cli.php                WP-CLI commands
 uninstall.php                  Removes dumps, options and scheduled events on uninstall

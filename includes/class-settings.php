@@ -19,11 +19,9 @@ class Pardesign_Entretien_Settings {
 	 */
 	public static function get( string $key, $default = '' ) {
 		$constants = array(
-			'backend_url'            => 'PARDESIGN_ENTRETIEN_BACKEND_URL',
-			'api_key'                => 'PARDESIGN_ENTRETIEN_API_KEY',
-			'site_id'                => 'PARDESIGN_ENTRETIEN_SITE_ID',
-			'clickup_task_id'        => 'PARDESIGN_ENTRETIEN_CLICKUP_TASK_ID',
-			'clickup_email_field_id' => 'PARDESIGN_ENTRETIEN_CLICKUP_EMAIL_FIELD_ID',
+			'backend_url' => 'PARDESIGN_ENTRETIEN_BACKEND_URL',
+			'api_key'     => 'PARDESIGN_ENTRETIEN_API_KEY',
+			'site_id'     => 'PARDESIGN_ENTRETIEN_SITE_ID',
 		);
 		if ( isset( $constants[ $key ] ) && defined( $constants[ $key ] ) ) {
 			return constant( $constants[ $key ] );

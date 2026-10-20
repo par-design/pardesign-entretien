@@ -124,21 +124,8 @@ class Pardesign_Entretien_Admin_UI {
 						<th scope="row"><label for="site_id"><?php esc_html_e( 'Identifiant du site', 'pardesign-entretien' ); ?></label></th>
 						<td><input name="site_id" id="site_id" type="text" class="regular-text" value="<?php echo esc_attr( Pardesign_Entretien_Settings::get( 'site_id' ) ); ?>"></td>
 					</tr>
-					<tr>
-						<th scope="row"><label for="clickup_task_id"><?php esc_html_e( 'ID de tâche ClickUp', 'pardesign-entretien' ); ?></label></th>
-						<td>
-							<input name="clickup_task_id" id="clickup_task_id" type="text" class="regular-text" value="<?php echo esc_attr( Pardesign_Entretien_Settings::get( 'clickup_task_id' ) ); ?>">
-							<p class="description"><?php esc_html_e( 'Tâche « client » dans ClickUp (sous-tâches = améliorations, champ courriel = destinataire). Synchronisé au backend à l’enregistrement.', 'pardesign-entretien' ); ?></p>
-						</td>
-					</tr>
-					<tr>
-						<th scope="row"><label for="clickup_email_field_id"><?php esc_html_e( 'ID du champ courriel ClickUp (optionnel)', 'pardesign-entretien' ); ?></label></th>
-						<td>
-							<input name="clickup_email_field_id" id="clickup_email_field_id" type="text" class="regular-text" value="<?php echo esc_attr( Pardesign_Entretien_Settings::get( 'clickup_email_field_id' ) ); ?>">
-							<p class="description"><?php esc_html_e( 'À renseigner seulement si la tâche a plusieurs champs de type courriel ; sinon le 1er champ courriel est utilisé automatiquement.', 'pardesign-entretien' ); ?></p>
-						</td>
-					</tr>
 				</table>
+				<p class="description"><?php esc_html_e( 'La liste ClickUp du site (entretiens, courriel du client, améliorations) se configure dans l’application PAR Design : Sites → Éditer.', 'pardesign-entretien' ); ?></p>
 				<?php submit_button( __( 'Enregistrer', 'pardesign-entretien' ) ); ?>
 			</form>
 		</div>
@@ -150,9 +137,6 @@ class Pardesign_Entretien_Admin_UI {
 			wp_die( esc_html__( 'Accès refusé.', 'pardesign-entretien' ) );
 		}
 		check_admin_referer( 'pardesign_entretien_save' );
-
-		$clickup_task_id        = isset( $_POST['clickup_task_id'] ) ? sanitize_text_field( wp_unslash( $_POST['clickup_task_id'] ) ) : '';
-		$clickup_email_field_id = isset( $_POST['clickup_email_field_id'] ) ? sanitize_text_field( wp_unslash( $_POST['clickup_email_field_id'] ) ) : '';
 
 		// Backend URL: HTTPS only (the API key travels in a header). An invalid value keeps the
 		// previous setting and is reported instead of being stored.
@@ -171,28 +155,15 @@ class Pardesign_Entretien_Admin_UI {
 
 		Pardesign_Entretien_Settings::update(
 			array(
-				'backend_url'            => $backend_url,
-				'api_key'                => $api_key,
-				'site_id'                => isset( $_POST['site_id'] ) ? sanitize_text_field( wp_unslash( $_POST['site_id'] ) ) : '',
-				'clickup_task_id'        => $clickup_task_id,
-				'clickup_email_field_id' => $clickup_email_field_id,
+				'backend_url' => $backend_url,
+				'api_key'     => $api_key,
+				'site_id'     => isset( $_POST['site_id'] ) ? sanitize_text_field( wp_unslash( $_POST['site_id'] ) ) : '',
 			)
 		);
 
 		$msg = __( 'Configuration enregistrée.', 'pardesign-entretien' );
 		if ( '' !== $url_error ) {
 			$msg .= ' ' . $url_error;
-		}
-
-		// Synchronise le mapping ClickUp vers le backend (si configuré).
-		if ( Pardesign_Entretien_Settings::is_configured() ) {
-			$sync = Pardesign_Entretien_Api_Client::sync_site( $clickup_task_id, $clickup_email_field_id );
-			if ( is_wp_error( $sync ) ) {
-				/* translators: %s: message d'erreur du backend */
-				$msg .= ' ' . sprintf( __( 'Synchro ClickUp échouée : %s', 'pardesign-entretien' ), $sync->get_error_message() );
-			} else {
-				$msg .= ' ' . __( 'Mapping ClickUp synchronisé au backend.', 'pardesign-entretien' );
-			}
 		}
 
 		$this->redirect( $msg );

@@ -107,8 +107,8 @@ Settings are available under **Tools → Entretien PAR Design**, or as constants
 | Backend URL | `PARDESIGN_ENTRETIEN_BACKEND_URL` |
 | Site API key | `PARDESIGN_ENTRETIEN_API_KEY` |
 | Site identifier | `PARDESIGN_ENTRETIEN_SITE_ID` |
-| ClickUp task ID | `PARDESIGN_ENTRETIEN_CLICKUP_TASK_ID` |
-| ClickUp email field ID | `PARDESIGN_ENTRETIEN_CLICKUP_EMAIL_FIELD_ID` |
+
+The site's ClickUp list (maintenance tasks, client email, improvements) is configured in the PAR Design backend only (Sites → Edit), never in the plugin. Since 0.9.2 the plugin no longer has ClickUp settings; values saved by earlier versions are ignored.
 
 The default backend URL is `https://entretiens.pardesign.net`; only `https://` URLs are accepted and used. The default site identifier is the site's hostname.
 

@@ -50,20 +50,6 @@ class Pardesign_Entretien_Api_Client {
 	}
 
 	/**
-	 * Synchronise le mapping ClickUp de ce site vers le backend (la clé API n'est
-	 * jamais modifiée côté backend par cet appel). Vide une valeur en passant ''.
-	 */
-	public static function sync_site( string $clickup_task_id, string $clickup_email_field_id = '' ) {
-		return self::post(
-			'/api/site',
-			array(
-				'clickup_task_id'        => $clickup_task_id,
-				'clickup_email_field_id' => $clickup_email_field_id,
-			)
-		);
-	}
-
-	/**
 	 * @return array|WP_Error Corps décodé en cas de succès, WP_Error sinon.
 	 */
 	private static function post( string $path, array $body ) {

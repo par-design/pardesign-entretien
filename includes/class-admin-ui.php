@@ -21,6 +21,15 @@ class Pardesign_Entretien_Admin_UI {
 	/** Transient prefix of the one-shot notice shown after a redirect, keyed by user id. */
 	const NOTICE_TRANSIENT = 'pardesign_entretien_notice_';
 
+	/** HTML allowed in the one-shot notice: only the link to the app's Courriels page. */
+	const NOTICE_HTML = array(
+		'a' => array(
+			'href'   => true,
+			'target' => true,
+			'rel'    => true,
+		),
+	);
+
 	public function hooks(): void {
 		add_action( 'admin_menu', array( $this, 'menu' ) );
 		add_action( 'admin_post_pardesign_entretien_save', array( $this, 'handle_save' ) );
@@ -53,7 +62,7 @@ class Pardesign_Entretien_Admin_UI {
 			<h1><?php esc_html_e( 'Entretien PAR Design', 'pardesign-entretien' ); ?></h1>
 
 			<?php if ( $notice ) : ?>
-				<div class="notice notice-info is-dismissible"><p><?php echo esc_html( $notice ); ?></p></div>
+				<div class="notice notice-info is-dismissible"><p><?php echo wp_kses( $notice, self::NOTICE_HTML ); ?></p></div>
 			<?php endif; ?>
 
 			<h2><?php esc_html_e( 'Entretien en cours', 'pardesign-entretien' ); ?></h2>
@@ -71,14 +80,8 @@ class Pardesign_Entretien_Admin_UI {
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline">
 					<?php wp_nonce_field( 'pardesign_entretien_action' ); ?>
 					<input type="hidden" name="action" value="pardesign_entretien_action">
-					<input type="hidden" name="op" value="finish_send">
-					<?php submit_button( __( 'Terminer et envoyer le rapport', 'pardesign-entretien' ), 'primary', 'submit', false ); ?>
-				</form>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline">
-					<?php wp_nonce_field( 'pardesign_entretien_action' ); ?>
-					<input type="hidden" name="action" value="pardesign_entretien_action">
-					<input type="hidden" name="op" value="finish_draft">
-					<?php submit_button( __( 'Terminer (brouillon, sans envoi)', 'pardesign-entretien' ), 'secondary', 'submit', false ); ?>
+					<input type="hidden" name="op" value="finish">
+					<?php submit_button( __( 'Terminer l’entretien', 'pardesign-entretien' ), 'primary', 'submit', false ); ?>
 				</form>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline">
 					<?php wp_nonce_field( 'pardesign_entretien_action' ); ?>
@@ -166,7 +169,7 @@ class Pardesign_Entretien_Admin_UI {
 			$msg .= ' ' . $url_error;
 		}
 
-		$this->redirect( $msg );
+		$this->redirect( esc_html( $msg ) );
 	}
 
 	public function handle_action(): void {
@@ -181,28 +184,40 @@ class Pardesign_Entretien_Admin_UI {
 		switch ( $op ) {
 			case 'start':
 				$result = Pardesign_Entretien::start();
-				$msg    = is_wp_error( $result ) ? $result->get_error_message() : __( 'Entretien démarré. Faites vos mises à jour, puis revenez le terminer.', 'pardesign-entretien' );
+				$msg    = esc_html( is_wp_error( $result ) ? $result->get_error_message() : __( 'Entretien démarré. Faites vos mises à jour, puis revenez le terminer.', 'pardesign-entretien' ) );
 				break;
-			case 'finish_send':
-				$result = Pardesign_Entretien::finish( true );
-				$msg    = is_wp_error( $result ) ? $result->get_error_message() : __( 'Entretien terminé et rapport envoyé au client.', 'pardesign-entretien' );
-				break;
+			case 'finish':
+			case 'finish_send':  // Anciens boutons, si la page a été chargée avant la mise à jour.
 			case 'finish_draft':
-				$result = Pardesign_Entretien::finish( false );
-				$msg    = is_wp_error( $result ) ? $result->get_error_message() : __( 'Entretien terminé. Brouillon de rapport généré, à valider dans le dashboard.', 'pardesign-entretien' );
+				// Le backend ne fait jamais d'envoi depuis le plugin : le rapport part
+				// toujours en brouillon, envoyé après validation dans l'application.
+				$entretien_id = Pardesign_Entretien::current_id();
+				$result       = Pardesign_Entretien::finish( false );
+				$msg          = is_wp_error( $result ) ? esc_html( $result->get_error_message() ) : self::draft_notice( (string) $entretien_id );
 				break;
 			case 'cancel':
 				Pardesign_Entretien::cancel();
-				$msg = __( 'Entretien annulé.', 'pardesign-entretien' );
+				$msg = esc_html__( 'Entretien annulé.', 'pardesign-entretien' );
 				break;
 			default:
-				$msg = __( 'Action inconnue.', 'pardesign-entretien' );
+				$msg = esc_html__( 'Action inconnue.', 'pardesign-entretien' );
 		}
 
 		$this->redirect( $msg );
 	}
 
-	/** Stores the message for the current user (60 s) and redirects to the page without any query parameter. */
+	/** Message after « Terminer » : the draft is waiting in the app's Courriels page, with a link to it. */
+	private static function draft_notice( string $entretien_id ): string {
+		$base = rtrim( (string) Pardesign_Entretien_Settings::get( 'backend_url' ), '/' );
+		$url  = $base . '/courriels?t=entretien' . ( '' !== $entretien_id ? '&e=' . rawurlencode( $entretien_id ) : '' );
+		return sprintf(
+			/* translators: %s: link to the Courriels page of the app */
+			esc_html__( 'Brouillon créé, à valider et envoyer dans les %s.', 'pardesign-entretien' ),
+			'<a href="' . esc_url( $url ) . '" target="_blank" rel="noopener">' . esc_html__( 'courriels de l’application', 'pardesign-entretien' ) . '</a>'
+		);
+	}
+
+	/** Stores the message (already-escaped HTML) for the current user (60 s) and redirects to the page without any query parameter. */
 	private function redirect( string $msg ): void {
 		set_transient( self::NOTICE_TRANSIENT . get_current_user_id(), $msg, MINUTE_IN_SECONDS );
 		wp_safe_redirect( admin_url( 'tools.php?page=pardesign-entretien' ) );

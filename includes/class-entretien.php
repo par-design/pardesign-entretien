@@ -15,6 +15,12 @@ class Pardesign_Entretien {
 	const CURRENT_OPTION = 'pardesign_entretien_current';
 
 	/**
+	 * Dernier entretien terminé (auto ou manuel) : id, date et extensions restées en
+	 * retard. Sert au bouton « Ajouter mes mises à jour au rapport » de wp-admin.
+	 */
+	const LAST_OPTION = 'pardesign_entretien_last';
+
+	/**
 	 * Démarre un entretien : capture le snapshot "avant" et le pousse au backend.
 	 *
 	 * @return array{entretien_id:string}|WP_Error
@@ -55,7 +61,7 @@ class Pardesign_Entretien {
 			return new WP_Error( 'none_running', __( 'Aucun entretien en cours.', 'pardesign-entretien' ) );
 		}
 
-		$snapshot = Pardesign_Entretien_Snapshot::capture();
+		$snapshot = Pardesign_Entretien_Snapshot::capture( true );
 		$pushed   = Pardesign_Entretien_Api_Client::push_snapshot( $id, 'after', $snapshot );
 		if ( is_wp_error( $pushed ) ) {
 			return $pushed;
@@ -66,6 +72,7 @@ class Pardesign_Entretien {
 			return $report;
 		}
 
+		self::remember_last( $id, $snapshot );
 		delete_option( self::CURRENT_OPTION );
 		return $report;
 	}
@@ -144,9 +151,13 @@ class Pardesign_Entretien {
 		}
 
 		$update_errors = array();
+		$plugin_errors = array();
 		if ( in_array( $scope, array( 'full', 'plugins' ), true ) ) {
 			Pardesign_Entretien_Lock::refresh( $entretien_id, 'updating' );
-			$update_errors = array_merge( $update_errors, self::update_all_plugins() );
+			$plugin_errors = self::update_all_plugins();
+			foreach ( $plugin_errors as $err ) {
+				$update_errors[] = sprintf( '%s: %s', $err['plugin'], $err['message'] );
+			}
 		}
 		// Résultat structuré de la màj du cœur (null si la portée n'inclut pas le
 		// cœur). On le remonte au backend via push_server_data → journalisé : plus
@@ -160,7 +171,10 @@ class Pardesign_Entretien {
 			}
 		}
 
-		$after = Pardesign_Entretien_Snapshot::capture();
+		// « Après » : màj disponibles relues (sinon les échecs paraissent à jour) et
+		// échecs détaillés par extension, pour la liste « non mises à jour » du backend.
+		$after                  = Pardesign_Entretien_Snapshot::capture( true );
+		$after['update_errors'] = $plugin_errors;
 		Pardesign_Entretien_Api_Client::push_snapshot( $entretien_id, 'after', $after );
 
 		// Données serveur pour le scan d'audit (best-effort), avec le statut de la
@@ -185,6 +199,7 @@ class Pardesign_Entretien {
 		// Garde-fou : en cas d'erreur de màj, on ne pousse pas l'envoi au client.
 		$effective_send = $send && empty( $update_errors );
 		$report         = Pardesign_Entretien_Api_Client::generate_report( $entretien_id, $effective_send );
+		self::remember_last( $entretien_id, $after );
 
 		// Flux normal terminé : le filet de sécurité devient un no-op, le verrou est libéré.
 		$finalized = true;
@@ -203,7 +218,9 @@ class Pardesign_Entretien {
 	/**
 	 * Met à jour toutes les extensions ayant une màj disponible.
 	 *
-	 * @return array<int,string> Messages d'erreur (vide si tout va bien).
+	 * @return array<int,array{plugin:string,slug:string,message:string}> Échecs, un par
+	 *         extension (vide si tout va bien). `plugin` = chemin (dossier/fichier.php),
+	 *         `slug` = même identifiant que dans le snapshot.
 	 */
 	private static function update_all_plugins(): array {
 		self::load_upgrader();
@@ -220,14 +237,31 @@ class Pardesign_Entretien {
 		$errors = array();
 		if ( is_array( $results ) ) {
 			foreach ( $results as $plugin => $result ) {
+				$message = null;
 				if ( is_wp_error( $result ) ) {
-					$errors[] = sprintf( '%s: %s', $plugin, $result->get_error_message() );
+					$message = $result->get_error_message();
+					// Le code dit souvent la cause mieux que le message (ex. no_package).
+					$code = $result->get_error_code();
+					if ( is_string( $code ) && '' !== $code && false === strpos( $message, $code ) ) {
+						$message .= ' [' . $code . ']';
+					}
 				} elseif ( null === $result || false === $result ) {
-					$errors[] = sprintf( '%s: mise à jour échouée.', $plugin );
+					$message = 'mise à jour échouée.';
+				}
+				if ( null !== $message ) {
+					$errors[] = array(
+						'plugin'  => (string) $plugin,
+						'slug'    => false !== strpos( (string) $plugin, '/' ) ? dirname( (string) $plugin ) : basename( (string) $plugin, '.php' ),
+						'message' => wp_strip_all_tags( (string) $message ),
+					);
 				}
 			}
 		} else {
-			$errors[] = __( 'Échec de la mise à jour groupée des extensions.', 'pardesign-entretien' );
+			$errors[] = array(
+				'plugin'  => '*',
+				'slug'    => '*',
+				'message' => __( 'Échec de la mise à jour groupée des extensions.', 'pardesign-entretien' ),
+			);
 		}
 		return $errors;
 	}
@@ -321,7 +355,9 @@ class Pardesign_Entretien {
 			return new WP_Error( 'no_id', __( 'entretien_id requis.', 'pardesign-entretien' ) );
 		}
 
-		$after  = Pardesign_Entretien_Snapshot::capture();
+		// Relance la vérification des màj : une extension mise à jour à la main depuis
+		// l'entretien apparaît alors dans le diff, et celles encore en retard restent signalées.
+		$after  = Pardesign_Entretien_Snapshot::capture( true );
 		$pushed = Pardesign_Entretien_Api_Client::push_snapshot( $entretien_id, 'after', $after );
 		if ( is_wp_error( $pushed ) ) {
 			return $pushed;
@@ -330,7 +366,46 @@ class Pardesign_Entretien {
 		// Données serveur rafraîchies (best-effort), comme un run normal.
 		Pardesign_Entretien_Api_Client::push_server_data( Pardesign_Entretien_Server_Audit::collect() );
 
-		return Pardesign_Entretien_Api_Client::generate_report( $entretien_id, $send );
+		$report = Pardesign_Entretien_Api_Client::generate_report( $entretien_id, $send );
+		if ( ! is_wp_error( $report ) ) {
+			self::remember_last( $entretien_id, $after );
+		}
+		return $report;
+	}
+
+	/**
+	 * Mémorise le dernier entretien terminé et les extensions encore en retard
+	 * dans son « après » (nom + version proposée).
+	 *
+	 * @param string $entretien_id Id de l'entretien.
+	 * @param array  $after        Snapshot « après ».
+	 */
+	private static function remember_last( string $entretien_id, array $after ): void {
+		$pending = array();
+		foreach ( (array) ( $after['plugins'] ?? array() ) as $p ) {
+			if ( ! empty( $p['update_available'] ) && (string) $p['update_available'] !== (string) ( $p['version'] ?? '' ) ) {
+				$pending[] = array(
+					'name'    => (string) ( $p['name'] ?? $p['slug'] ?? '' ),
+					'version' => (string) ( $p['version'] ?? '' ),
+					'to'      => (string) $p['update_available'],
+				);
+			}
+		}
+		update_option(
+			self::LAST_OPTION,
+			array(
+				'entretien_id' => $entretien_id,
+				'finished_at'  => gmdate( 'c' ),
+				'pending'      => $pending,
+			),
+			false
+		);
+	}
+
+	/** Dernier entretien terminé, ou null. */
+	public static function last(): ?array {
+		$last = get_option( self::LAST_OPTION );
+		return is_array( $last ) && ! empty( $last['entretien_id'] ) ? $last : null;
 	}
 
 	/** Lève les limites PHP pour les opérations longues (màj cœur/plugins). */

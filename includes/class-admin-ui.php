@@ -100,6 +100,7 @@ class Pardesign_Entretien_Admin_UI {
 				<?php if ( ! Pardesign_Entretien_Settings::is_configured() ) : ?>
 					<p class="description"><?php esc_html_e( 'Configurez d’abord le backend ci-dessous.', 'pardesign-entretien' ); ?></p>
 				<?php endif; ?>
+				<?php $this->render_last(); ?>
 			<?php endif; ?>
 
 			<hr>
@@ -195,6 +196,15 @@ class Pardesign_Entretien_Admin_UI {
 				$result       = Pardesign_Entretien::finish( false );
 				$msg          = is_wp_error( $result ) ? esc_html( $result->get_error_message() ) : self::draft_notice( (string) $entretien_id );
 				break;
+			case 'refresh_last':
+				$last = Pardesign_Entretien::last();
+				if ( ! $last ) {
+					$msg = esc_html__( 'Aucun entretien terminé à compléter.', 'pardesign-entretien' );
+					break;
+				}
+				$result = Pardesign_Entretien::recover( (string) $last['entretien_id'], false );
+				$msg    = is_wp_error( $result ) ? esc_html( $result->get_error_message() ) : self::draft_notice( (string) $last['entretien_id'] );
+				break;
 			case 'cancel':
 				Pardesign_Entretien::cancel();
 				$msg = esc_html__( 'Entretien annulé.', 'pardesign-entretien' );
@@ -204,6 +214,46 @@ class Pardesign_Entretien_Admin_UI {
 		}
 
 		$this->redirect( $msg );
+	}
+
+	/**
+	 * Dernier entretien : extensions restées en retard et bouton pour ajouter au
+	 * rapport les mises à jour faites ensuite à la main (nouvel état « après »).
+	 */
+	private function render_last(): void {
+		$last = Pardesign_Entretien::last();
+		if ( ! $last || ! Pardesign_Entretien_Settings::is_configured() ) {
+			return;
+		}
+		$pending = isset( $last['pending'] ) && is_array( $last['pending'] ) ? $last['pending'] : array();
+		?>
+		<h2><?php esc_html_e( 'Dernier entretien', 'pardesign-entretien' ); ?></h2>
+		<p>
+			<?php
+			printf(
+				/* translators: 1: identifiant, 2: date */
+				esc_html__( '%1$s, terminé le %2$s.', 'pardesign-entretien' ),
+				'<code>' . esc_html( (string) $last['entretien_id'] ) . '</code>',
+				esc_html( wp_date( 'Y-m-d H:i', strtotime( (string) $last['finished_at'] ) ) )
+			);
+			?>
+		</p>
+		<?php if ( $pending ) : ?>
+			<p><?php esc_html_e( 'Extensions non mises à jour par l’entretien :', 'pardesign-entretien' ); ?></p>
+			<ul style="list-style:disc;margin-left:20px">
+				<?php foreach ( $pending as $p ) : ?>
+					<li><?php echo esc_html( sprintf( '%s (%s → %s)', $p['name'] ?? '', $p['version'] ?? '', $p['to'] ?? '' ) ); ?></li>
+				<?php endforeach; ?>
+			</ul>
+		<?php endif; ?>
+		<p class="description"><?php esc_html_e( 'Après avoir mis à jour une extension à la main, ajoutez-la au rapport de cet entretien (le brouillon est refait avec l’état actuel du site).', 'pardesign-entretien' ); ?></p>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<?php wp_nonce_field( 'pardesign_entretien_action' ); ?>
+			<input type="hidden" name="action" value="pardesign_entretien_action">
+			<input type="hidden" name="op" value="refresh_last">
+			<?php submit_button( __( 'Ajouter mes mises à jour au rapport', 'pardesign-entretien' ), 'secondary', 'submit', false ); ?>
+		</form>
+		<?php
 	}
 
 	/** Message after « Terminer » : the draft is waiting in the app's Courriels page, with a link to it. */

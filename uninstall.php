@@ -28,6 +28,7 @@ wp_unschedule_hook( 'pardesign_csp_scan_run' ); // pending CSP scans
 delete_option( 'pardesign_entretien_settings' );
 delete_site_option( 'pardesign_entretien_settings' ); // multisite: network option
 delete_option( 'pardesign_entretien_current' );
+delete_option( 'pardesign_entretien_last' );
 delete_option( 'pardesign_entretien_update_error' );
 delete_option( 'pardesign_entretien_lock' );
 delete_transient( 'pardesign_entretien_update_meta_v2' );

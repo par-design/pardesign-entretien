@@ -16,9 +16,17 @@ class Pardesign_Entretien_Snapshot {
 	/**
 	 * Construit le snapshot courant.
 	 *
+	 * @param bool $refresh_updates Relancer la vérification des mises à jour avant la
+	 *                              capture. À utiliser pour un « après » : une màj
+	 *                              groupée (ou faite à la main dans wp-admin) vide le
+	 *                              cache `update_plugins`, et sans relance une
+	 *                              extension restée en retard paraîtrait à jour.
 	 * @return array{site:string,wp_core_version:string,plugins:array,taken_at:string,source:string}
 	 */
-	public static function capture(): array {
+	public static function capture( bool $refresh_updates = false ): array {
+		if ( $refresh_updates ) {
+			self::refresh_plugin_updates();
+		}
 		return array(
 			'site'            => (string) Pardesign_Entretien_Settings::get( 'site_id' ),
 			'wp_core_version' => self::core_version(),
@@ -26,6 +34,18 @@ class Pardesign_Entretien_Snapshot {
 			'taken_at'        => gmdate( 'c' ),
 			'source'          => 'wp',
 		);
+	}
+
+	/** Force une nouvelle vérification des mises à jour d'extensions (best-effort). */
+	private static function refresh_plugin_updates(): void {
+		if ( ! function_exists( 'wp_update_plugins' ) ) {
+			require_once ABSPATH . WPINC . '/update.php';
+		}
+		if ( ! function_exists( 'get_plugins' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+		delete_site_transient( 'update_plugins' );
+		wp_update_plugins();
 	}
 
 	private static function core_version(): string {

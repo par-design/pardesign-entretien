@@ -111,6 +111,19 @@ class Pardesign_Entretien_Rest {
 			)
 		);
 
+		// Lecture seule : version du plugin et de l'environnement, pour la page
+		// « Plugin » de l'application (bouton « Revérifier les versions »). Ne modifie rien.
+		register_rest_route(
+			self::NAMESPACE,
+			'/status',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'handle_status' ),
+				'permission_callback' => array( $this, 'authorize' ),
+				'show_in_index'       => false,
+			)
+		);
+
 		register_rest_route(
 			self::NAMESPACE,
 			'/audit-data',
@@ -258,6 +271,20 @@ class Pardesign_Entretien_Rest {
 	}
 
 	/** Collecte et pousse les données serveur, et les renvoie au backend appelant. */
+	/** Version du plugin, de WordPress et de PHP (lecture seule). */
+	public function handle_status( WP_REST_Request $request ) {
+		global $wp_version;
+		return new WP_REST_Response(
+			array(
+				'ok'          => true,
+				'version'     => PARDESIGN_ENTRETIEN_VERSION,
+				'wp_version'  => (string) $wp_version,
+				'php_version' => PHP_VERSION,
+			),
+			200
+		);
+	}
+
 	public function handle_audit_data( WP_REST_Request $request ) {
 		$data = Pardesign_Entretien_Server_Audit::collect();
 		Pardesign_Entretien_Api_Client::push_server_data( $data );

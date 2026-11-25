@@ -299,62 +299,13 @@ class Pardesign_Entretien_Rest {
 	 * site est déjà à jour, répond `updated:false` sans rien faire.
 	 */
 	public function handle_self_update( WP_REST_Request $request ) {
-		if ( ! function_exists( 'get_plugin_data' ) ) {
-			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		$res = Pardesign_Entretien_Updater::self_update();
+		if ( ! $res['ok'] ) {
+			return new WP_REST_Response( $res, 500 );
 		}
-		require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
-		require_once ABSPATH . 'wp-admin/includes/update.php';
-		if ( ! class_exists( 'Automatic_Upgrader_Skin' ) ) {
-			require_once ABSPATH . 'wp-admin/includes/class-automatic-upgrader-skin.php';
+		if ( ! $res['updated'] ) {
+			return new WP_REST_Response( array( 'ok' => true, 'updated' => false, 'version' => $res['version'] ?? PARDESIGN_ENTRETIEN_VERSION, 'last_error' => $res['last_error'] ), 200 );
 		}
-
-		@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-
-		$basename = plugin_basename( PARDESIGN_ENTRETIEN_FILE );
-		$before   = PARDESIGN_ENTRETIEN_VERSION;
-
-		// Force une vérification fraîche : vide notre cache de métadonnées ET le
-		// transient d'update de WordPress, puis relance la détection.
-		delete_transient( Pardesign_Entretien_Updater::CACHE_KEY );
-		delete_site_transient( 'update_plugins' );
-		wp_update_plugins();
-
-		$updates = get_site_transient( 'update_plugins' );
-		$target  = isset( $updates->response[ $basename ]->new_version )
-			? (string) $updates->response[ $basename ]->new_version
-			: '';
-
-		if ( '' === $target ) {
-			return new WP_REST_Response(
-				array( 'ok' => true, 'updated' => false, 'version' => $before, 'last_error' => Pardesign_Entretien_Updater::last_error() ),
-				200
-			);
-		}
-
-		$skin     = new Automatic_Upgrader_Skin();
-		$upgrader = new Plugin_Upgrader( $skin );
-		$result   = $upgrader->upgrade( $basename );
-
-		if ( is_wp_error( $result ) ) {
-			return new WP_REST_Response( array( 'ok' => false, 'error' => $result->get_error_message(), 'last_error' => Pardesign_Entretien_Updater::last_error() ), 500 );
-		}
-		if ( false === $result || null === $result ) {
-			$messages = $skin->get_upgrade_messages();
-			return new WP_REST_Response(
-				array( 'ok' => false, 'error' => 'Échec de la mise à jour.', 'log' => $messages ),
-				500
-			);
-		}
-
-		// L'upgrader désactive le plugin le temps du remplacement des fichiers ;
-		// on garantit sa réactivation (sinon le site se retrouve sans le plugin).
-		if ( ! is_plugin_active( $basename ) ) {
-			activate_plugin( $basename );
-		}
-
-		return new WP_REST_Response(
-			array( 'ok' => true, 'updated' => true, 'from' => $before, 'to' => $target ),
-			200
-		);
+		return new WP_REST_Response( array( 'ok' => true, 'updated' => true, 'from' => $res['from'], 'to' => $res['to'] ), 200 );
 	}
 }

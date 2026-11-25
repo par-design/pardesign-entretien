@@ -50,6 +50,16 @@ class Pardesign_Entretien_Api_Client {
 	}
 
 	/**
+	 * Tâche planifiée de mise à jour : annonce la version installée (en-tête) et
+	 * demande au backend si ce site peut se mettre à jour tout seul.
+	 *
+	 * @return array|WP_Error { ok:bool, autoUpdate:bool }
+	 */
+	public static function plugin_check() {
+		return self::post( '/api/site/plugin', array() );
+	}
+
+	/**
 	 * @return array|WP_Error Corps décodé en cas de succès, WP_Error sinon.
 	 */
 	private static function post( string $path, array $body ) {
@@ -72,6 +82,9 @@ class Pardesign_Entretien_Api_Client {
 					'Content-Type'  => 'application/json',
 					'Authorization' => 'Bearer ' . Pardesign_Entretien_Settings::get( 'api_key' ),
 					'X-Pardesign-Site' => (string) Pardesign_Entretien_Settings::get( 'site_id' ),
+					// Version installée : le backend tient à jour la liste des versions,
+					// même pour les sites qu'il ne peut pas joindre (mode pull, pare-feu).
+					'X-Pardesign-Plugin-Version' => PARDESIGN_ENTRETIEN_VERSION,
 				),
 				'body'    => wp_json_encode( $body ),
 			)

@@ -67,12 +67,124 @@ class Pardesign_Entretien_Updater {
 		$this->basename = plugin_basename( PARDESIGN_ENTRETIEN_FILE );
 	}
 
+	/** WP-Cron hook: scheduled self-update (twice a day). */
+	const AUTO_HOOK = 'pardesign_entretien_auto_update';
+
+	/** Option: last backend decision for this site ("yes" / "no"). Absent = no auto-update. */
+	const AUTO_OPTION = 'pardesign_entretien_auto_update';
+
 	public function hooks(): void {
+		// Mises à jour automatiques de CE plugin seulement : forcées dans WordPress
+		// (mises à jour en arrière-plan), plus notre propre tâche planifiée en
+		// renfort, pour les sites où les mises à jour automatiques sont coupées.
+		add_filter( 'auto_update_plugin', array( $this, 'force_auto_update' ), 20, 2 );
+		add_action( self::AUTO_HOOK, array( __CLASS__, 'run_auto_update' ) );
+		add_action( 'init', array( $this, 'schedule_auto_update' ) );
+
 		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'inject_update' ) );
 		add_filter( 'plugins_api', array( $this, 'plugin_info' ), 20, 3 );
 		add_filter( 'upgrader_pre_download', array( $this, 'verified_download' ), 10, 4 );
 		add_filter( 'upgrader_source_selection', array( $this, 'fix_source_dir' ), 10, 4 );
 		add_action( 'upgrader_process_complete', array( $this, 'flush_cache' ), 10, 2 );
+	}
+
+	/**
+	 * Force WordPress background updates for this plugin only, and only when the
+	 * backend allowed it for this site (last check). Otherwise WordPress decides.
+	 */
+	public function force_auto_update( $update, $item ) {
+		if ( is_object( $item ) && isset( $item->plugin ) && $item->plugin === $this->basename
+			&& 'yes' === get_option( self::AUTO_OPTION ) ) {
+			return true;
+		}
+		return $update;
+	}
+
+	/** Schedules the twice-daily self-update if missing (survives a reactivation). */
+	public function schedule_auto_update(): void {
+		if ( ! wp_next_scheduled( self::AUTO_HOOK ) ) {
+			wp_schedule_event( time() + HOUR_IN_SECONDS, 'twicedaily', self::AUTO_HOOK );
+		}
+	}
+
+	/**
+	 * Scheduled self-update. Skipped when file changes are forbidden on the site
+	 * or while an entretien holds the lock (it will run at the next occurrence).
+	 */
+	public static function run_auto_update(): void {
+		// Annonce la version et demande l'autorisation au backend (réglage par site,
+		// ex. coupé pour les sites gérés par RCGT). Sans réponse : pas de mise à jour.
+		$check = Pardesign_Entretien_Api_Client::plugin_check();
+		$allowed = ! is_wp_error( $check ) && ! empty( $check['autoUpdate'] );
+		if ( ! is_wp_error( $check ) ) {
+			update_option( self::AUTO_OPTION, $allowed ? 'yes' : 'no', false );
+		}
+		if ( ! $allowed ) {
+			return;
+		}
+		if ( defined( 'DISALLOW_FILE_MODS' ) && DISALLOW_FILE_MODS ) {
+			return;
+		}
+		if ( null !== Pardesign_Entretien_Lock::current() ) {
+			return;
+		}
+		self::self_update();
+	}
+
+	/**
+	 * Updates the plugin to the latest signed GitHub release, if newer. Shared by
+	 * the REST route /self-update (deploy button) and the scheduled auto-update.
+	 *
+	 * @return array{ok:bool,updated:bool,from?:string,to?:string,version?:string,error?:string,log?:array,last_error:string}
+	 */
+	public static function self_update(): array {
+		if ( ! function_exists( 'get_plugin_data' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+		require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+		require_once ABSPATH . 'wp-admin/includes/update.php';
+		if ( ! class_exists( 'Automatic_Upgrader_Skin' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/class-automatic-upgrader-skin.php';
+		}
+
+		@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+
+		$basename = plugin_basename( PARDESIGN_ENTRETIEN_FILE );
+		$before   = PARDESIGN_ENTRETIEN_VERSION;
+
+		// Force une vérification fraîche : vide notre cache de métadonnées ET le
+		// transient d'update de WordPress, puis relance la détection.
+		delete_transient( self::CACHE_KEY );
+		delete_site_transient( 'update_plugins' );
+		wp_update_plugins();
+
+		$updates = get_site_transient( 'update_plugins' );
+		$target  = isset( $updates->response[ $basename ]->new_version )
+			? (string) $updates->response[ $basename ]->new_version
+			: '';
+
+		if ( '' === $target ) {
+			return array( 'ok' => true, 'updated' => false, 'version' => $before, 'last_error' => self::last_error() );
+		}
+
+		$skin     = new Automatic_Upgrader_Skin();
+		$upgrader = new Plugin_Upgrader( $skin );
+		$result   = $upgrader->upgrade( $basename );
+
+		if ( is_wp_error( $result ) ) {
+			return array( 'ok' => false, 'updated' => false, 'error' => $result->get_error_message(), 'last_error' => self::last_error() );
+		}
+		if ( false === $result || null === $result ) {
+			return array( 'ok' => false, 'updated' => false, 'error' => 'Échec de la mise à jour.', 'log' => $skin->get_upgrade_messages(), 'last_error' => self::last_error() );
+		}
+
+		// L'upgrader désactive le plugin le temps du remplacement des fichiers ;
+		// on garantit sa réactivation (sinon le site se retrouve sans le plugin).
+		if ( ! is_plugin_active( $basename ) ) {
+			activate_plugin( $basename );
+		}
+
+		return array( 'ok' => true, 'updated' => true, 'from' => $before, 'to' => $target, 'last_error' => '' );
 	}
 
 	/** "owner/repo" of the releases repository, validated so it can only ever build a github.com URL. */

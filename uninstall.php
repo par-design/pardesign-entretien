@@ -31,6 +31,7 @@ delete_option( 'pardesign_entretien_current' );
 delete_option( 'pardesign_entretien_last' );
 delete_option( 'pardesign_entretien_update_error' );
 delete_option( 'pardesign_entretien_lock' );
+delete_option( 'pardesign_entretien_auto_update' );
 delete_transient( 'pardesign_entretien_update_meta_v2' );
 
 // CSP: policy, captured reports, scanner configuration and transient state.
